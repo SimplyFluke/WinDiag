@@ -11,6 +11,68 @@ if ([System.Threading.Thread]::CurrentThread.ApartmentState -ne 'STA') {
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 
+$updateUri = 'https://raw.githubusercontent.com/SimplyFluke/WinDiag/refs/heads/main/duplicateFinder.ps1'
+$scriptPath = $PSCommandPath
+
+try {
+    if (-not $scriptPath -or -not (Test-Path -LiteralPath $scriptPath -PathType Leaf)) {
+        throw 'The running script path could not be resolved.'
+    }
+
+    $remoteContent = (Invoke-WebRequest -Uri $updateUri -TimeoutSec 15 -UseBasicParsing -ErrorAction Stop).Content
+    $localContent = [System.IO.File]::ReadAllText($scriptPath)
+    $normalizedRemote = ([string]$remoteContent).TrimStart([char]0xFEFF) -replace "`r`n?", "`n"
+    $normalizedLocal = $localContent.TrimStart([char]0xFEFF) -replace "`r`n?", "`n"
+
+    if ($normalizedRemote -cne $normalizedLocal) {
+        $tokens = $null
+        $parseErrors = $null
+        [void][System.Management.Automation.Language.Parser]::ParseInput(
+            [string]$remoteContent,
+            [ref]$tokens,
+            [ref]$parseErrors
+        )
+        if ($parseErrors.Count -gt 0) {
+            $parseSummary = ($parseErrors | Select-Object -First 5 | ForEach-Object { $_.Message }) -join "`r`n"
+            throw "The downloaded update has PowerShell syntax errors and was not installed:`r`n$parseSummary"
+        }
+
+        $directory = [System.IO.Path]::GetDirectoryName($scriptPath)
+        $temporaryPath = Join-Path $directory ([System.IO.Path]::GetRandomFileName())
+        $backupPath = "$scriptPath.update-backup"
+        try {
+            [System.IO.File]::WriteAllText(
+                $temporaryPath,
+                [string]$remoteContent,
+                [System.Text.UTF8Encoding]::new($false)
+            )
+            [System.IO.File]::Replace($temporaryPath, $scriptPath, $backupPath)
+            Remove-Item -LiteralPath $backupPath -Force -ErrorAction Stop
+        }
+        finally {
+            if (Test-Path -LiteralPath $temporaryPath) {
+                Remove-Item -LiteralPath $temporaryPath -Force -ErrorAction SilentlyContinue
+            }
+        }
+
+        $powerShellPath = (Get-Process -Id $PID).Path
+        if (-not $powerShellPath) {
+            throw 'The update was installed, but PowerShell could not be located to restart the app.'
+        }
+        $arguments = '-STA -NoProfile -File "{0}"' -f $scriptPath
+        Start-Process -FilePath $powerShellPath -ArgumentList $arguments -WorkingDirectory $directory -WindowStyle Hidden
+        return
+    }
+}
+catch {
+    [System.Windows.Forms.MessageBox]::Show(
+        "Could not check for or install updates. The current version will start.`r`n`r`n$($_.Exception.Message)",
+        'Update check failed',
+        [System.Windows.Forms.MessageBoxButtons]::OK,
+        [System.Windows.Forms.MessageBoxIcon]::Warning
+    ) | Out-Null
+}
+
 function Get-DuplicateGroups {
     param(
         [Parameter(Mandatory)]
