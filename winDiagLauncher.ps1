@@ -170,40 +170,159 @@ function Get-LauncherUpdates {
         [System.Collections.IDictionary]$ProgressState
     )
 
+    # Only the file listing uses the GitHub API (60 unauthenticated requests per hour per IP address).
+    # File contents come from raw.githubusercontent.com, which is not counted against that limit, and the
+    # listing is cached with its ETag because "304 Not Modified" answers do not count against the limit either.
     $results = [System.Collections.Generic.List[object]]::new()
     $apiUri = 'https://api.github.com/repos/SimplyFluke/WinDiag/contents/?ref=main'
+    $rawBaseUri = 'https://raw.githubusercontent.com/SimplyFluke/WinDiag/main/'
+    $cachePath = Join-Path $Directory '.windiag-update-cache.json'
     $headers = @{
         Accept = 'application/vnd.github+json'
         'User-Agent' = 'WinDiagLauncher'
     }
+
+    function Get-HttpErrorInfo {
+        param($ErrorRecord)
+        $info = @{ StatusCode = $null; ResetTime = $null }
+        $response = $ErrorRecord.Exception.Response
+        if (-not $response) {
+            return $info
+        }
+        try {
+            $info.StatusCode = [int]$response.StatusCode
+        }
+        catch {
+        }
+        $resetValue = $null
+        try {
+            $resetValue = $response.Headers['X-RateLimit-Reset']
+        }
+        catch {
+        }
+        if (-not $resetValue) {
+            try {
+                $resetValue = @($response.Headers.GetValues('X-RateLimit-Reset'))[0]
+            }
+            catch {
+            }
+        }
+        if ($resetValue) {
+            try {
+                $info.ResetTime = [DateTimeOffset]::FromUnixTimeSeconds([long]$resetValue).LocalDateTime
+            }
+            catch {
+            }
+        }
+        $info
+    }
+
+    function Get-RawFileBytes {
+        param([Parameter(Mandatory)][string]$FileName)
+        $uri = $rawBaseUri + [System.Uri]::EscapeDataString($FileName)
+        $response = Invoke-WebRequest -Uri $uri -Headers @{ 'User-Agent' = 'WinDiagLauncher' } -TimeoutSec 30 -UseBasicParsing -ErrorAction Stop
+        $response.RawContentStream.ToArray()
+    }
+
+    function Install-ScriptBytes {
+        param([Parameter(Mandatory)][byte[]]$Bytes, [Parameter(Mandatory)][string]$FileName)
+        $content = [System.Text.UTF8Encoding]::new($false, $true).GetString($Bytes)
+        $tokens = $null
+        $parseErrors = $null
+        [void][System.Management.Automation.Language.Parser]::ParseInput($content, [ref]$tokens, [ref]$parseErrors)
+        if ($parseErrors.Count -gt 0) {
+            $parseSummary = ($parseErrors | Select-Object -First 5 | ForEach-Object { $_.Message }) -join '; '
+            throw "The downloaded script has PowerShell syntax errors; the local copy was not changed. $parseSummary"
+        }
+
+        $localPath = Join-Path $Directory $FileName
+        $temporaryPath = Join-Path $Directory ('.{0}.{1}.tmp' -f $FileName, [guid]::NewGuid().ToString('N'))
+        $backupPath = "$temporaryPath.backup"
+        try {
+            [System.IO.File]::WriteAllBytes($temporaryPath, $Bytes)
+            if (Test-Path -LiteralPath $localPath -PathType Leaf) {
+                [System.IO.File]::Replace($temporaryPath, $localPath, $backupPath)
+            }
+            else {
+                [System.IO.File]::Move($temporaryPath, $localPath)
+            }
+        }
+        finally {
+            if (Test-Path -LiteralPath $temporaryPath -PathType Leaf) {
+                [System.IO.File]::Delete($temporaryPath)
+            }
+            if (Test-Path -LiteralPath $backupPath -PathType Leaf) {
+                [System.IO.File]::Delete($backupPath)
+            }
+        }
+    }
+
     $ProgressState.Stage = 'Checking GitHub for script updates...'
     try {
         [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor [System.Net.SecurityProtocolType]::Tls12
     }
     catch {
     }
+
+    $cache = $null
+    if (Test-Path -LiteralPath $cachePath -PathType Leaf) {
+        try {
+            $cache = ConvertFrom-Json -InputObject ([System.IO.File]::ReadAllText($cachePath))
+        }
+        catch {
+            $cache = $null
+        }
+    }
+    $listingHeaders = $headers.Clone()
+    if ($cache -and $cache.ETag -and $cache.Content) {
+        $listingHeaders['If-None-Match'] = [string]$cache.ETag
+    }
+
+    $listingJson = $null
+    $listingProblem = $null
     try {
-        $repositoryResponse = Invoke-WebRequest -Uri $apiUri -Headers $headers -TimeoutSec 20 -UseBasicParsing -ErrorAction Stop
-        # Windows PowerShell 5.1 emits a JSON array as a single object; unroll it explicitly.
-        $repositoryFiles = @(ConvertFrom-Json -InputObject $repositoryResponse.Content | ForEach-Object { $_ })
+        $listingResponse = Invoke-WebRequest -Uri $apiUri -Headers $listingHeaders -TimeoutSec 20 -UseBasicParsing -ErrorAction Stop
+        if ([int]$listingResponse.StatusCode -eq 304 -and $cache) {
+            $listingJson = [string]$cache.Content
+        }
+        else {
+            $listingJson = [string]$listingResponse.Content
+            $etag = @($listingResponse.Headers['ETag'])[0]
+            if ($etag) {
+                try {
+                    if (Test-Path -LiteralPath $cachePath -PathType Leaf) {
+                        # Hidden files cannot be overwritten with WriteAllText, so clear the attribute first.
+                        (Get-Item -LiteralPath $cachePath -Force).Attributes = [System.IO.FileAttributes]::Normal
+                    }
+                    [System.IO.File]::WriteAllText($cachePath, (ConvertTo-Json -InputObject @{ ETag = [string]$etag; Content = $listingJson } -Compress))
+                    (Get-Item -LiteralPath $cachePath -Force).Attributes = [System.IO.FileAttributes]::Hidden
+                }
+                catch {
+                }
+            }
+        }
     }
     catch {
-        return [pscustomobject]@{
-            Results = @([pscustomobject]@{
-                File = 'GitHub'
-                Status = 'Check failed'
-                Detail = $_.Exception.Message
-            })
-            CheckedCount = 0
-            UpdatedCount = 0
-            FailureCount = 1
+        $httpInfo = Get-HttpErrorInfo -ErrorRecord $_
+        if ($httpInfo.StatusCode -eq 304 -and $cache) {
+            $listingJson = [string]$cache.Content
+        }
+        elseif ($httpInfo.StatusCode -in @(403, 429)) {
+            $resetText = if ($httpInfo.ResetTime) { " until $($httpInfo.ResetTime.ToString('HH:mm'))" } else { ' for up to an hour' }
+            $listingProblem = "GitHub's hourly limit for update checks from this network is used up; updates are paused$resetText."
+        }
+        else {
+            $listingProblem = "Could not reach GitHub: $($_.Exception.Message)"
         }
     }
 
     $filesByName = @{}
-    foreach ($repositoryFile in $repositoryFiles) {
-        if ($repositoryFile.type -eq 'file') {
-            $filesByName[[string]$repositoryFile.name] = $repositoryFile
+    if ($listingJson) {
+        # Windows PowerShell 5.1 emits a JSON array as a single object; unroll it explicitly.
+        foreach ($repositoryFile in @(ConvertFrom-Json -InputObject $listingJson | ForEach-Object { $_ })) {
+            if ($repositoryFile.type -eq 'file') {
+                $filesByName[[string]$repositoryFile.name] = $repositoryFile
+            }
         }
     }
 
@@ -214,6 +333,30 @@ function Get-LauncherUpdates {
         $tool = $Tools[$index]
         $ProgressState.Stage = "Checking $($tool.Name) ($($index + 1) of $($Tools.Count))..."
         $checkedCount++
+        $localPath = Join-Path $Directory $tool.File
+        $localExists = Test-Path -LiteralPath $localPath -PathType Leaf
+
+        if (-not $listingJson) {
+            # No file list (rate limit or offline): leave existing files alone, but still try to fetch missing ones.
+            if ($localExists) {
+                $results.Add([pscustomobject]@{ File = $tool.File; Status = 'Not checked'; Detail = '' })
+                continue
+            }
+            try {
+                $ProgressState.Stage = "Downloading $($tool.Name)..."
+                Install-ScriptBytes -Bytes (Get-RawFileBytes -FileName $tool.File) -FileName $tool.File
+                $updatedCount++
+                $results.Add([pscustomobject]@{ File = $tool.File; Status = 'Updated'; Detail = 'Downloaded without a checksum check.' })
+            }
+            catch {
+                $failureCount++
+                $httpInfo = Get-HttpErrorInfo -ErrorRecord $_
+                $detail = if ($httpInfo.StatusCode -eq 404) { 'Not published to GitHub yet, so it could not be downloaded.' } else { $_.Exception.Message }
+                $results.Add([pscustomobject]@{ File = $tool.File; Status = 'Download failed'; Detail = $detail })
+            }
+            continue
+        }
+
         if (-not $filesByName.ContainsKey($tool.File)) {
             $failureCount++
             $missingDetail = if (Test-Path -LiteralPath (Join-Path $Directory $tool.File) -PathType Leaf) {
@@ -231,9 +374,8 @@ function Get-LauncherUpdates {
         }
 
         $repositoryFile = $filesByName[$tool.File]
-        $localPath = Join-Path $Directory $tool.File
         try {
-            if (Test-Path -LiteralPath $localPath -PathType Leaf) {
+            if ($localExists) {
                 $localBytes = [System.IO.File]::ReadAllBytes($localPath)
                 $localSha = Get-GitBlobSha1 -Bytes $localBytes
                 if ($localSha -eq [string]$repositoryFile.sha) {
@@ -247,51 +389,17 @@ function Get-LauncherUpdates {
             }
 
             $ProgressState.Stage = "Downloading $($tool.Name)..."
-            $response = Invoke-RestMethod -Uri ([string]$repositoryFile.git_url) -Headers $headers -TimeoutSec 20 -ErrorAction Stop
-            if ($response.encoding -ne 'base64') {
-                throw "GitHub returned an unsupported encoding for $($tool.File)."
+            $remoteBytes = Get-RawFileBytes -FileName $tool.File
+            if ((Get-GitBlobSha1 -Bytes $remoteBytes) -ne [string]$repositoryFile.sha) {
+                # raw.githubusercontent.com caches files for a few minutes, so a fresh push can briefly serve the old copy.
+                $results.Add([pscustomobject]@{
+                    File = $tool.File
+                    Status = 'Pending'
+                    Detail = 'GitHub is still publishing the latest version; it will be installed on a later launch.'
+                })
+                continue
             }
-            $remoteBytes = [System.Convert]::FromBase64String([string]$response.content)
-            $remoteContent = [System.Text.UTF8Encoding]::new($false, $true).GetString($remoteBytes)
-            $downloadSha = Get-GitBlobSha1 -Bytes $remoteBytes
-            if ($downloadSha -ne [string]$repositoryFile.sha) {
-                throw 'The downloaded content did not match the repository file hash; the local copy was not changed.'
-            }
-
-            $tokens = $null
-            $parseErrors = $null
-            [void][System.Management.Automation.Language.Parser]::ParseInput(
-                $remoteContent,
-                [ref]$tokens,
-                [ref]$parseErrors
-            )
-            if ($parseErrors.Count -gt 0) {
-                $parseSummary = ($parseErrors | Select-Object -First 5 | ForEach-Object { $_.Message }) -join '; '
-                throw "The downloaded script has PowerShell syntax errors; the local copy was not changed. $parseSummary"
-            }
-
-            $temporaryPath = Join-Path $Directory ('.{0}.{1}.tmp' -f $tool.File, [guid]::NewGuid().ToString('N'))
-            $backupPath = "$temporaryPath.backup"
-            try {
-                [System.IO.File]::WriteAllBytes($temporaryPath, $remoteBytes)
-                if (Test-Path -LiteralPath $localPath -PathType Leaf) {
-                    [System.IO.File]::Replace($temporaryPath, $localPath, $backupPath)
-                    if (Test-Path -LiteralPath $backupPath -PathType Leaf) {
-                        [System.IO.File]::Delete($backupPath)
-                    }
-                }
-                else {
-                    [System.IO.File]::Move($temporaryPath, $localPath)
-                }
-            }
-            finally {
-                if (Test-Path -LiteralPath $temporaryPath -PathType Leaf) {
-                    [System.IO.File]::Delete($temporaryPath)
-                }
-                if (Test-Path -LiteralPath $backupPath -PathType Leaf) {
-                    [System.IO.File]::Delete($backupPath)
-                }
-            }
+            Install-ScriptBytes -Bytes $remoteBytes -FileName $tool.File
 
             $updatedCount++
             $results.Add([pscustomobject]@{
@@ -310,11 +418,17 @@ function Get-LauncherUpdates {
         }
     }
 
+    $notice = $listingProblem
+    $pendingCount = @($results | Where-Object { $_.Status -eq 'Pending' }).Count
+    if (-not $notice -and $pendingCount -gt 0) {
+        $notice = "$pendingCount update(s) are still being published by GitHub and will install on a later launch."
+    }
     [pscustomobject]@{
         Results = @($results)
         CheckedCount = $checkedCount
         UpdatedCount = $updatedCount
         FailureCount = $failureCount
+        Notice = $notice
     }
 }
 
@@ -641,8 +755,14 @@ $updateTimer.Add_Tick({
         }
         $report = $output[$output.Count - 1]
         if ($report.FailureCount -gt 0) {
-            $failures = @($report.Results | Where-Object { $_.Status -notin @('Up to date', 'Updated') })
-            $failureText = ($failures | ForEach-Object { "$($_.File): $($_.Detail)" }) -join "`r`n"
+            $failures = @($report.Results | Where-Object { $_.Status -notin @('Up to date', 'Updated', 'Not checked', 'Pending') })
+            if ($report.Notice) {
+                $failureText = "$($report.Notice)`r`n`r`n"
+            }
+            else {
+                $failureText = ''
+            }
+            $failureText += ($failures | ForEach-Object { "$($_.File): $($_.Detail)" }) -join "`r`n"
             $statusLabel.Text = "Update check completed with $($report.FailureCount) issue(s); local tools remain available."
             [System.Windows.Forms.MessageBox]::Show(
                 $form,
@@ -651,6 +771,11 @@ $updateTimer.Add_Tick({
                 [System.Windows.Forms.MessageBoxButtons]::OK,
                 [System.Windows.Forms.MessageBoxIcon]::Warning
             ) | Out-Null
+        }
+        elseif ($report.Notice) {
+            # Rate limits and CDN delays are expected now and then; report them quietly instead of with a dialog.
+            $prefix = if ($report.UpdatedCount -gt 0) { "Downloaded $($report.UpdatedCount) script(s). " } else { '' }
+            $statusLabel.Text = "$prefix$($report.Notice)"
         }
         elseif ($report.UpdatedCount -gt 0) {
             $statusLabel.Text = "Updated $($report.UpdatedCount) script(s); checked $($report.CheckedCount) tools."
