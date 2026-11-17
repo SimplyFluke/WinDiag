@@ -21,6 +21,7 @@ function Get-DuplicateGroups {
 
     $ProgressState.Stage = 'Listing files...'
     $files = @(Get-ChildItem -LiteralPath $Path -Recurse -File -ErrorAction Stop)
+    $rootPath = [System.IO.Path]::GetFullPath($Path).TrimEnd('\', '/')
     $ProgressState.Total = $files.Count
     $ProgressState.Current = 0
     $hashes = @{}
@@ -58,9 +59,16 @@ function Get-DuplicateGroups {
             continue
         }
 
+        $rootFiles = @($groupFiles | Where-Object {
+            [System.IO.Path]::GetFullPath($_.DirectoryName).TrimEnd('\', '/') -eq $rootPath
+        })
         $copyFiles = @($groupFiles | Where-Object { $_.BaseName -match '(?i)Kopi|Copy|\(\d+\)' })
-        if ($copyFiles.Count -eq $groupFiles.Count) {
-            $copyFiles = @($groupFiles | Select-Object -Skip 1)
+        $hasSubfolderFiles = @($groupFiles | Where-Object {
+            [System.IO.Path]::GetFullPath($_.DirectoryName).TrimEnd('\', '/') -ne $rootPath
+        }).Count -gt 0
+        if ($copyFiles.Count -eq $groupFiles.Count -or ($copyFiles.Count -eq 0 -and $hasSubfolderFiles)) {
+            $keeper = if ($rootFiles.Count -gt 0) { $rootFiles[0] } else { $groupFiles[0] }
+            $copyFiles = @($groupFiles | Where-Object { $_.FullName -ne $keeper.FullName })
         }
         $copyPaths = @{}
         foreach ($copyFile in $copyFiles) {
@@ -71,7 +79,8 @@ function Get-DuplicateGroups {
             foreach ($groupFile in $groupFiles) {
                 [pscustomobject]@{
                     File = $groupFile
-                    ShouldDelete = $copyPaths.ContainsKey($groupFile.FullName)
+                    IsCopyCandidate = $copyPaths.ContainsKey($groupFile.FullName)
+                    IsSubfolder = [System.IO.Path]::GetFullPath($groupFile.DirectoryName).TrimEnd('\', '/') -ne $rootPath
                 }
             }
         )
@@ -172,6 +181,13 @@ $deleteButton = [System.Windows.Forms.Button]::new()
 $deleteButton.Text = 'Delete copies'
 $deleteButton.Size = [System.Drawing.Size]::new(140, 32)
 $deleteButton.Enabled = $false
+$includeSubfolderCopies = [System.Windows.Forms.CheckBox]::new()
+$includeSubfolderCopies.Text = 'Include subfolder copies'
+$includeSubfolderCopies.AutoSize = $true
+$includeSubfolderCopies.Checked = $false
+$includeSubfolderCopies.Visible = $false
+$includeSubfolderCopies.ForeColor = $form.ForeColor
+$includeSubfolderCopies.Cursor = [System.Windows.Forms.Cursors]::Hand
 $actionsPanel = [System.Windows.Forms.FlowLayoutPanel]::new()
 $actionsPanel.Dock = [System.Windows.Forms.DockStyle]::Fill
 $actionsPanel.WrapContents = $false
@@ -179,6 +195,7 @@ $actionsPanel.FlowDirection = [System.Windows.Forms.FlowDirection]::LeftToRight
 $actionsPanel.Padding = [System.Windows.Forms.Padding]::new(0, 2, 0, 0)
 $actionsPanel.Controls.Add($scanButton)
 $actionsPanel.Controls.Add($deleteButton)
+$actionsPanel.Controls.Add($includeSubfolderCopies)
 $toolbarLayout.Controls.Add($actionsPanel, 0, 1)
 $toolbarLayout.SetColumnSpan($actionsPanel, 3)
 $toolbarPanel.Controls.Add($toolbarLayout)
@@ -344,6 +361,7 @@ $script:scanProgressState = $null
 function Add-ScanResults {
     param([Parameter(Mandatory)]$Result)
 
+    $hasSubfolderCopies = $false
     foreach ($group in $Result.Groups) {
         $groupRow = [System.Windows.Forms.ListViewItem]::new('Duplicate group')
         $groupRow.SubItems.Add("$($group.Items.Count) identical files") | Out-Null
@@ -354,21 +372,38 @@ function Add-ScanResults {
 
         foreach ($item in $group.Items) {
             $file = $item.File
-            $action = if ($item.ShouldDelete) { 'Delete copy' } else { 'Keep' }
+            $shouldDelete = $item.IsCopyCandidate -and (-not $item.IsSubfolder -or $includeSubfolderCopies.Checked)
+            if ($item.IsCopyCandidate -and $item.IsSubfolder) {
+                $hasSubfolderCopies = $true
+            }
+            $action = if ($shouldDelete) {
+                'Delete copy'
+            }
+            elseif ($item.IsCopyCandidate -and $item.IsSubfolder) {
+                'Subfolder copy'
+            }
+            else {
+                'Keep'
+            }
             $row = [System.Windows.Forms.ListViewItem]::new($file.Name)
             $row.SubItems.Add($action) | Out-Null
             $row.SubItems.Add($file.DirectoryName) | Out-Null
             $row.Tag = [pscustomobject]@{
                 Path = $file.FullName
-                ShouldDelete = $item.ShouldDelete
+                IsCopyCandidate = $item.IsCopyCandidate
+                IsSubfolder = $item.IsSubfolder
+                IsDeleted = $false
+                ShouldDelete = $shouldDelete
             }
-            if ($item.ShouldDelete) {
+            if ($shouldDelete -or ($item.IsCopyCandidate -and $item.IsSubfolder)) {
                 $row.ForeColor = [System.Drawing.Color]::FromArgb(255, 190, 100)
             }
             $listView.Items.Add($row) | Out-Null
         }
     }
 
+    $includeSubfolderCopies.Checked = $false
+    $includeSubfolderCopies.Visible = $hasSubfolderCopies
     $deleteCount = @($listView.Items | Where-Object { $_.Tag.ShouldDelete }).Count
     $deleteButton.Enabled = $deleteCount -gt 0
     if ($Result.Groups.Count -eq 0) {
@@ -392,6 +427,30 @@ function Add-ScanResults {
         ) | Out-Null
     }
 }
+
+$includeSubfolderCopies.Add_CheckedChanged({
+    foreach ($row in $listView.Items) {
+        if (-not $row.Tag -or -not $row.Tag.IsCopyCandidate -or $row.Tag.IsDeleted) {
+            continue
+        }
+
+        $row.Tag.ShouldDelete = -not $row.Tag.IsSubfolder -or $includeSubfolderCopies.Checked
+        if ($row.Tag.ShouldDelete) {
+            $row.SubItems[1].Text = 'Delete copy'
+            $row.ForeColor = [System.Drawing.Color]::FromArgb(255, 190, 100)
+        }
+        elseif ($row.Tag.IsSubfolder) {
+            $row.SubItems[1].Text = 'Subfolder copy'
+            $row.ForeColor = [System.Drawing.Color]::FromArgb(255, 190, 100)
+        }
+        else {
+            $row.SubItems[1].Text = 'Keep'
+            $row.ForeColor = $form.ForeColor
+        }
+    }
+
+    $deleteButton.Enabled = @($listView.Items | Where-Object { $_.Tag.ShouldDelete }).Count -gt 0
+})
 
 $scanTimer.Add_Tick({
     if ($script:scanProgressState) {
@@ -475,6 +534,8 @@ $browseButton.Add_Click({
         $scanButton.Enabled = $true
         $listView.Items.Clear()
         $deleteButton.Enabled = $false
+        $includeSubfolderCopies.Checked = $false
+        $includeSubfolderCopies.Visible = $false
         $statusLabel.Text = 'Ready to scan.'
     }
 })
@@ -493,6 +554,8 @@ $scanButton.Add_Click({
 
     $listView.Items.Clear()
     $deleteButton.Enabled = $false
+    $includeSubfolderCopies.Checked = $false
+    $includeSubfolderCopies.Visible = $false
     $browseButton.Enabled = $false
     $scanButton.Enabled = $false
     $form.Cursor = [System.Windows.Forms.Cursors]::WaitCursor
@@ -580,6 +643,7 @@ $deleteButton.Add_Click({
             Remove-Item -LiteralPath $row.Tag.Path -ErrorAction Stop
             $row.SubItems[1].Text = 'Deleted'
             $row.Tag.ShouldDelete = $false
+            $row.Tag.IsDeleted = $true
             $row.ForeColor = [System.Drawing.Color]::FromArgb(130, 200, 140)
             $deletedCount++
         }
