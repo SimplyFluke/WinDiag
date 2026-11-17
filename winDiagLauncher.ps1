@@ -99,7 +99,8 @@ function Get-LauncherUpdates {
     $ProgressState.Stage = 'Checking GitHub for script updates...'
     try {
         $repositoryResponse = Invoke-WebRequest -Uri $apiUri -Headers $headers -TimeoutSec 20 -UseBasicParsing -ErrorAction Stop
-        $repositoryFiles = @(ConvertFrom-Json -InputObject $repositoryResponse.Content)
+        # Windows PowerShell 5.1 emits a JSON array as a single object; unroll it explicitly.
+        $repositoryFiles = @(ConvertFrom-Json -InputObject $repositoryResponse.Content | ForEach-Object { $_ })
     }
     catch {
         return [pscustomobject]@{
