@@ -3,8 +3,8 @@ if ([System.Threading.Thread]::CurrentThread.ApartmentState -ne 'STA') {
     if (-not $powerShellPath) {
         throw 'Could not determine the PowerShell executable path needed to start the UI in STA mode.'
     }
-    $arguments = '-STA -NoProfile -ExecutionPolicy Bypass -File "{0}"' -f $PSCommandPath
-    Start-Process -FilePath $powerShellPath -ArgumentList $arguments -WorkingDirectory (Get-Location).Path -WindowStyle Hidden
+    $arguments = '-WindowStyle Hidden -STA -NoProfile -ExecutionPolicy Bypass -File "{0}"' -f $PSCommandPath
+    Start-Process -FilePath $powerShellPath -ArgumentList $arguments -WorkingDirectory (Get-Location).Path
     return
 }
 
@@ -646,7 +646,7 @@ function Update-ToggleButtons {
 function Restart-AsAdministrator {
     $powerShellPath = (Get-Process -Id $PID).Path
     try {
-        Start-Process -FilePath $powerShellPath -Verb RunAs -ArgumentList ('-STA -NoProfile -ExecutionPolicy Bypass -File "{0}"' -f $PSCommandPath) -WindowStyle Hidden -ErrorAction Stop
+        Start-Process -FilePath $powerShellPath -Verb RunAs -ArgumentList ('-WindowStyle Hidden -STA -NoProfile -ExecutionPolicy Bypass -File "{0}"' -f $PSCommandPath) -ErrorAction Stop
         $form.Close()
     }
     catch {

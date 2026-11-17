@@ -3,8 +3,8 @@ if ([System.Threading.Thread]::CurrentThread.ApartmentState -ne 'STA') {
     if (-not $powerShellPath) {
         throw 'Could not determine the PowerShell executable path needed to start the UI in STA mode.'
     }
-    $arguments = '-STA -NoProfile -ExecutionPolicy Bypass -File "{0}"' -f $PSCommandPath
-    Start-Process -FilePath $powerShellPath -ArgumentList $arguments -WorkingDirectory (Get-Location).Path -WindowStyle Hidden
+    $arguments = '-WindowStyle Hidden -STA -NoProfile -ExecutionPolicy Bypass -File "{0}"' -f $PSCommandPath
+    Start-Process -FilePath $powerShellPath -ArgumentList $arguments -WorkingDirectory (Get-Location).Path
     return
 }
 
@@ -1080,8 +1080,8 @@ if ($adminButton) {
     $adminButton.Add_Click({
         try {
             $powerShellPath = (Get-Process -Id $PID).Path
-            $arguments = '-STA -NoProfile -ExecutionPolicy Bypass -File "{0}"' -f $script:toolScriptPath
-            Start-Process -FilePath $powerShellPath -ArgumentList $arguments -Verb RunAs -WindowStyle Hidden -ErrorAction Stop
+            $arguments = '-WindowStyle Hidden -STA -NoProfile -ExecutionPolicy Bypass -File "{0}"' -f $script:toolScriptPath
+            Start-Process -FilePath $powerShellPath -ArgumentList $arguments -Verb RunAs -ErrorAction Stop
             $form.Close()
         }
         catch {

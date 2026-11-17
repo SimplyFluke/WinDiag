@@ -3,8 +3,8 @@ if ([System.Threading.Thread]::CurrentThread.ApartmentState -ne 'STA') {
     if (-not $powerShellPath) {
         throw 'Could not determine the PowerShell executable path needed to start the UI in STA mode.'
     }
-    $arguments = '-STA -NoProfile -ExecutionPolicy Bypass -File "{0}"' -f $PSCommandPath
-    Start-Process -FilePath $powerShellPath -ArgumentList $arguments -WorkingDirectory (Get-Location).Path -WindowStyle Hidden
+    $arguments = '-WindowStyle Hidden -STA -NoProfile -ExecutionPolicy Bypass -File "{0}"' -f $PSCommandPath
+    Start-Process -FilePath $powerShellPath -ArgumentList $arguments -WorkingDirectory (Get-Location).Path
     return
 }
 
@@ -841,8 +841,8 @@ $updateTimer.Add_Tick({
         if ($answer -eq [System.Windows.Forms.DialogResult]::Yes) {
             try {
                 $powerShellPath = (Get-Process -Id $PID).Path
-                $arguments = '-STA -NoProfile -ExecutionPolicy Bypass -File "{0}"' -f (Join-Path $script:launcherDirectory $script:launcherFile)
-                Start-Process -FilePath $powerShellPath -ArgumentList $arguments -WorkingDirectory $script:launcherDirectory -WindowStyle Hidden
+                $arguments = '-WindowStyle Hidden -STA -NoProfile -ExecutionPolicy Bypass -File "{0}"' -f (Join-Path $script:launcherDirectory $script:launcherFile)
+                Start-Process -FilePath $powerShellPath -ArgumentList $arguments -WorkingDirectory $script:launcherDirectory
                 $form.Close()
             }
             catch {
