@@ -135,6 +135,18 @@ $script:tools = @(
         Description = 'Unquoted paths, unsigned or missing executables and failed services.'
     },
     [pscustomobject]@{
+        Category = 'Security'
+        Name = 'Browser Hijack Check'
+        File = 'browserHijackCheck.ps1'
+        Description = 'Forced browser policies, search and start pages, proxy, hosts file, DNS and shortcuts.'
+    },
+    [pscustomobject]@{
+        Category = 'Security'
+        Name = 'Remote Access Detector'
+        File = 'remoteAccessDetector.ps1'
+        Description = 'AnyDesk, TeamViewer and other remote control tools, plus Remote Desktop settings.'
+    },
+    [pscustomobject]@{
         Category = 'Event Logs'
         Name = 'Recent Error & Critical Event Collector'
         File = 'recentErrorCollector.ps1'
